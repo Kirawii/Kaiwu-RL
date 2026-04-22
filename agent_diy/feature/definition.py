@@ -203,7 +203,12 @@ def reward_shaping(
     _obs
 ):
     """
-    奖励塑形函数 - 课程学习 + 情景奖励 + 密集奖励
+    奖励塑形函数 - 稀疏奖励版本 (参考亚军方案 kaiwu_taichu-2025)
+
+    简化策略：
+    1. 每步小额惩罚 (-0.02)，鼓励高效行动
+    2. 只有终局有大奖励/惩罚
+    3. 让模型自己学习生存和收集策略
 
     Args:
         frame_no: 当前帧号
@@ -216,134 +221,39 @@ def reward_shaping(
         _obs: 下一观测
 
     Returns:
-        reward: numpy数组 [生存奖励, 宝箱奖励]
+        reward: numpy数组 [总奖励]
     """
-    reward = np.zeros(Config.VALUE_NUM, dtype=np.float32)
+    # ============ 稀疏奖励核心：只有基础惩罚 + 终局奖励 ============
 
-    if not remain_info:
-        remain_info = {}
-    if not _remain_info:
-        _remain_info = {}
+    # 每步惩罚（很小，让模型有紧迫感但不过度惩罚生存）
+    # 亚军方案: -0.02/步
+    r = -0.02
 
-    # 获取课程学习阶段
-    is_early_phase = remain_info.get('is_early_phase', False)
-    is_late_phase = remain_info.get('is_late_phase', False)
-    progress_ratio = remain_info.get('progress_ratio', 0.5)
+    # 撞墙惩罚（可选，如果信息可用）
+    # hit_wall = remain_info.get('hit_wall', False)
+    # if hit_wall:
+    #     r -= 0.1
 
-    # ============ 生存价值奖励 ============
-    survive_reward = Config.SURVIVE_REWARD_BASE
-
-    # 距离塑形: 远离怪物获得正奖励
-    cur_min_dist = remain_info.get('min_monster_dist_norm', 0.5)
-    next_min_dist = _remain_info.get('min_monster_dist_norm', 0.5)
-    dist_shaping = Config.DISTANCE_SHAPING_COEF * (next_min_dist - cur_min_dist)
-
-    # 步数奖励: 活得越久奖励越高 (鼓励生存)
-    step_reward = Config.STEP_REWARD_COEF * progress_ratio
-
-    # 终局奖励
+    # 终局奖励（稀疏奖励的主要来源）
     if terminated:
-        final_reward = Config.DEATH_PENALTY
+        r += Config.DEATH_PENALTY  # -10
     elif truncated:
-        final_reward = Config.WIN_REWARD
-    else:
-        final_reward = 0.0
+        r += Config.WIN_REWARD     # +10
 
-    # 基础生存奖励
-    survive_total = survive_reward + dist_shaping + step_reward + final_reward
+    # ============ 注释掉的密集奖励（供参考） ============
+    """
+    # 以下奖励被注释掉，采用稀疏奖励策略：
+    # - 宝箱收集奖励
+    # - Buff收集奖励
+    # - 距离塑形奖励
+    # - 情景奖励
+    # - 记忆惩罚
+    #
+    # 原理：让模型自己从终局奖励中学习长期策略，
+    # 而不是被人为设计的密集奖励引导
+    """
 
-    # ============ 宝箱收集奖励 (课程学习) ============
-    treasure_reward = 0.0
-
-    # 根据阶段调整宝箱奖励权重
-    if is_early_phase:
-        treasure_weight = 1.0  # 前期重视收集
-    elif is_late_phase:
-        treasure_weight = 0.3  # 后期降低收集权重，重视生存
-    else:
-        treasure_weight = 0.7  # 中期平衡
-
-    # 收集宝箱奖励
-    cur_treasure_count = remain_info.get('treasure_collected', 0)
-    next_treasure_count = _remain_info.get('treasure_collected', 0)
-    if next_treasure_count > cur_treasure_count:
-        if is_early_phase:
-            treasure_reward += Config.TREASURE_REWARD_EARLY
-        else:
-            treasure_reward += Config.TREASURE_REWARD_LATE
-
-    # 探索奖励: 靠近未收集宝箱
-    cur_treasure_dist = remain_info.get('nearest_treasure_dist_norm', 1.0)
-    next_treasure_dist = _remain_info.get('nearest_treasure_dist_norm', 1.0)
-    if next_treasure_dist < cur_treasure_dist:
-        treasure_reward += Config.EXPLORATION_REWARD * (cur_treasure_dist - next_treasure_dist)
-
-    treasure_total = treasure_reward * treasure_weight
-
-    # ============ Buff奖励 (递减，参考优秀经验) ============
-    buff_reward = 0.0
-    cur_buff_count = remain_info.get('buff_collected', 0)
-    next_buff_count = _remain_info.get('buff_collected', 0)
-    if next_buff_count > cur_buff_count:
-        # 递减奖励: 0.5, 0.25, 0.125...
-        decay = Config.REW_BUFF_DECAY ** cur_buff_count
-        buff_reward = Config.REW_BUFF * decay
-
-    # ============ 距离奖励 (宝箱 + Buff) ============
-    distance_reward = 0.0
-
-    # 宝箱距离奖励
-    if 'nearest_treasure_dist_norm' in remain_info and 'nearest_treasure_dist_norm' in _remain_info:
-        cur_treasure_dist = remain_info['nearest_treasure_dist_norm']
-        next_treasure_dist = _remain_info['nearest_treasure_dist_norm']
-        delta_dist = cur_treasure_dist - next_treasure_dist  # 靠近为正
-        delta_dist = np.clip(delta_dist, -Config.REW_DISTANCE_CLIP, Config.REW_DISTANCE_CLIP)
-        distance_reward += delta_dist * Config.REW_DISTANCE
-
-    # Buff距离奖励 (新增：引导agent去收集Buff)
-    # 假设buff特征中第4个元素(索引3)是距离桶归一化值
-    buff_in_view = remain_info.get('nearest_buff_in_view', False)
-    if buff_in_view and 'nearest_buff_dist_norm' in remain_info and 'nearest_buff_dist_norm' in _remain_info:
-        cur_buff_dist = remain_info['nearest_buff_dist_norm']
-        next_buff_dist = _remain_info['nearest_buff_dist_norm']
-        buff_delta = cur_buff_dist - next_buff_dist
-        buff_delta = np.clip(buff_delta, -Config.REW_DISTANCE_CLIP, Config.REW_DISTANCE_CLIP)
-        distance_reward += buff_delta * Config.REW_DISTANCE * 1.5  # Buff距离奖励权重更高
-
-    # ============ 记忆惩罚 (避免重复路径) ============
-    memory_penalty = 0.0
-    if 'around_memory_sum' in remain_info:
-        around_sum = remain_info['around_memory_sum']
-        if around_sum > Config.REW_MEMORY_PUNISH_THRESHOLD:
-            memory_penalty = min(
-                (around_sum - Config.REW_MEMORY_PUNISH_THRESHOLD) * Config.REW_MEMORY_PUNISH_COEF,
-                1.0
-            )
-
-    # ============ 情景奖励 (核心) ============
-    situational_total = calculate_situational_rewards_scalar(remain_info, _remain_info)
-
-    # 总奖励 = 生存 + 宝箱 + Buff + 距离 - 记忆惩罚 + 情景
-    # 注意：前期重视收集，后期重视生存
-    if is_early_phase:
-        collection_weight = 1.0
-        survival_weight = 0.5
-    elif is_late_phase:
-        collection_weight = 0.3
-        survival_weight = 1.5
-    else:
-        collection_weight = 0.7
-        survival_weight = 1.0
-
-    total_reward = (
-        survive_total * survival_weight +
-        treasure_total * collection_weight +
-        buff_reward * collection_weight +
-        distance_reward -
-        memory_penalty +
-        situational_total
-    )
-    return np.array([total_reward], dtype=np.float32)
+    return np.array([r], dtype=np.float32)
 
 
 # ==================== 样本处理 ====================
