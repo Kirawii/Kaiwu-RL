@@ -1,0 +1,229 @@
+
+message Observation {
+  FrameState frame_state = 1;     // 局部环境数据
+  ScoreInfo score_info = 2;       // 得分信息
+  repeated MapInfo map_info = 3;  // 局部地图信息
+  repeated int32 legal_act = 4;   // 合法动作
+}
+
+// 地图信息为二维信息
+message MapInfo {
+  repeated int32 values = 1; // 地图信息行信息
+}
+
+message ScoreInfo {
+  float score = 1;                    // 即时得分
+  float total_score = 2;              // 总得分
+  int32 step_no = 3;                  // 步号
+  int32 treasure_collected_count = 4; // 收集到的宝箱数量
+  int32 treasure_score = 5;           // 收集到的宝箱得分
+  int32 buff_count = 6;              // 收集到的buff数量
+  int32 talent_count = 7;            // 使用技能的数量
+}
+
+message ExtraInfo {
+  int32 result_code = 1;      // 错误码
+  string result_message = 2;  // 错误信息
+  FrameState frame_state = 3; // 全局环境数据
+  GameInfo game_info = 4;        // 环境信息
+}
+
+// 相对位置信息
+message RelativePosition {
+  RelativeDirection direction = 1;  // 相对方位（离散化）
+  RelativeDistance l2_distance = 2; // L2距离（离散化）
+}
+
+// 离散化的相对方向
+enum RelativeDirection {
+  RELATIVE_DIRECTION_NONE = 0;
+  East = 1;
+  NorthEast = 2;
+  North = 3;
+  NorthWest = 4;
+  West = 5;
+  SouthWest = 6;
+  South = 7;
+  SouthEast = 8;
+}
+
+// 离散化的相对距离
+// 每个级别相差20个网格坐标距离（L2距离）
+enum RelativeDistance {
+  RELATIVE_DISTANCE_NONE = 0;
+  VerySmall = 1;  //0 ~ 20
+  Small = 2;      //20 ~ 40
+  Medium = 3;     //40 ~ 60
+  Large = 4;      //60 ~ 80
+  VeryLarge = 5;  //80 ~ 180
+}
+
+
+// 环境数据
+message FrameState {
+  int32 step_no = 1;             // 步数
+  repeated RealmHero heroes = 2;  // 英雄状态
+  repeated RealmOrgan organs = 3; // 物件状态
+}
+
+message GameInfo {
+  float score = 1;                    // 即时得分
+  float total_score = 2;              // 总得分
+  int32 step_no = 3;                  // 步号
+  Position pos = 4;                   // 英雄当前位置
+  Position start_pos = 5;             // 起点位置
+  Position end_pos = 6;               // 终点位置
+  int32 treasure_collected_count = 7; // 收集到的宝箱数量
+  int32 treasure_score = 8;           // 收集到的宝箱得分
+  int32 treasure_count = 9;           // 宝箱总数
+  int32 buff_count = 10;              // 收集到的buff数量
+  int32 talent_count = 11;            // 使用技能的数量
+  int32 buff_remain_time = 12;        // 剩余加速时间
+  int32 buff_duration = 13;           // 总加速时间
+  repeated MapInfo map_info = 14;     // 局部地图信息
+  repeated int32 obstacle_id = 15;    // 障碍物id
+}
+
+// 英雄信息
+message RealmHero {
+  int32 hero_id = 1;  // 英雄id
+  Position pos = 2;   // 英雄当前位置
+  int32 speed_up = 3; // 英雄是否处于加速状态
+  Talent talent = 4;  // 召唤师技能
+  int32 buff_remain_time = 5;        // 剩余加速时间
+}
+
+// 召唤师技能
+message Talent {
+  int32 talent_type = 1; // 技能名
+  int32 status = 2;      // 技能状态，0表示CD中，1表示available
+  int32 cooldown = 3;    // 技能剩余冷却时间
+}
+
+message RealmOrgan {
+  int32 sub_type = 1; // 物件类型，1代表宝箱, 2代表加速buff,3代表起点,4代表终点
+  int32 config_id = 2; // 物件id 0代表buff，1~13代表宝箱 21代表起点, 22代表终点
+  int32 status = 3; // 0表示不可获取，1表示可获取, -1表示视野外
+  Position pos = 4; // 物件位置坐标
+  int32 cooldown = 5;                // 物件剩余冷却时间
+  RelativePosition relative_pos = 6; // 物件相对位置
+}
+
+message Position {
+  int32 x = 1; // x坐标
+  int32 z = 2; // z坐标
+}
+message Observation {
+  FrameState frame_state = 1;     // 局部环境数据
+  ScoreInfo score_info = 2;       // 得分信息
+  repeated MapInfo map_info = 3;  // 局部地图信息
+  repeated int32 legal_act = 4;   // 合法动作
+}
+
+// 地图信息为二维信息
+message MapInfo {
+  repeated int32 values = 1; // 地图信息行信息
+}
+
+message ScoreInfo {
+  float score = 1;                    // 即时得分
+  float total_score = 2;              // 总得分
+  int32 step_no = 3;                  // 步号
+  int32 treasure_collected_count = 4; // 收集到的宝箱数量
+  int32 treasure_score = 5;           // 收集到的宝箱得分
+  int32 buff_count = 6;              // 收集到的buff数量
+  int32 talent_count = 7;            // 使用技能的数量
+}
+
+message ExtraInfo {
+  int32 result_code = 1;      // 错误码
+  string result_message = 2;  // 错误信息
+  FrameState frame_state = 3; // 全局环境数据
+  GameInfo game_info = 4;        // 环境信息
+}
+
+// 相对位置信息
+message RelativePosition {
+  RelativeDirection direction = 1;  // 相对方位（离散化）
+  RelativeDistance l2_distance = 2; // L2距离（离散化）
+}
+
+// 离散化的相对方向
+enum RelativeDirection {
+  RELATIVE_DIRECTION_NONE = 0;
+  East = 1;
+  NorthEast = 2;
+  North = 3;
+  NorthWest = 4;
+  West = 5;
+  SouthWest = 6;
+  South = 7;
+  SouthEast = 8;
+}
+
+// 离散化的相对距离
+// 每个级别相差20个网格坐标距离（L2距离）
+enum RelativeDistance {
+  RELATIVE_DISTANCE_NONE = 0;
+  VerySmall = 1;  //0 ~ 20
+  Small = 2;      //20 ~ 40
+  Medium = 3;     //40 ~ 60
+  Large = 4;      //60 ~ 80
+  VeryLarge = 5;  //80 ~ 180
+}
+
+
+// 环境数据
+message FrameState {
+  int32 step_no = 1;             // 步数
+  repeated RealmHero heroes = 2;  // 英雄状态
+  repeated RealmOrgan organs = 3; // 物件状态
+}
+
+message GameInfo {
+  float score = 1;                    // 即时得分
+  float total_score = 2;              // 总得分
+  int32 step_no = 3;                  // 步号
+  Position pos = 4;                   // 英雄当前位置
+  Position start_pos = 5;             // 起点位置
+  Position end_pos = 6;               // 终点位置
+  int32 treasure_collected_count = 7; // 收集到的宝箱数量
+  int32 treasure_score = 8;           // 收集到的宝箱得分
+  int32 treasure_count = 9;           // 宝箱总数
+  int32 buff_count = 10;              // 收集到的buff数量
+  int32 talent_count = 11;            // 使用技能的数量
+  int32 buff_remain_time = 12;        // 剩余加速时间
+  int32 buff_duration = 13;           // 总加速时间
+  repeated MapInfo map_info = 14;     // 局部地图信息
+  repeated int32 obstacle_id = 15;    // 障碍物id
+}
+
+// 英雄信息
+message RealmHero {
+  int32 hero_id = 1;  // 英雄id
+  Position pos = 2;   // 英雄当前位置
+  int32 speed_up = 3; // 英雄是否处于加速状态
+  Talent talent = 4;  // 召唤师技能
+  int32 buff_remain_time = 5;        // 剩余加速时间
+}
+
+// 召唤师技能
+message Talent {
+  int32 talent_type = 1; // 技能名
+  int32 status = 2;      // 技能状态，0表示CD中，1表示available
+  int32 cooldown = 3;    // 技能剩余冷却时间
+}
+
+message RealmOrgan {
+  int32 sub_type = 1; // 物件类型，1代表宝箱, 2代表加速buff,3代表起点,4代表终点
+  int32 config_id = 2; // 物件id 0代表buff，1~13代表宝箱 21代表起点, 22代表终点
+  int32 status = 3; // 0表示不可获取，1表示可获取, -1表示视野外
+  Position pos = 4; // 物件位置坐标
+  int32 cooldown = 5;                // 物件剩余冷却时间
+  RelativePosition relative_pos = 6; // 物件相对位置
+}
+
+message Position {
+  int32 x = 1; // x坐标
+  int32 z = 2; // z坐标
+}
