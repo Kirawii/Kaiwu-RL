@@ -34,26 +34,25 @@ ObsData = create_cls(
 
 ActData = create_cls(
     "ActData",
-    action=None,         # 采样动作
-    d_action=None,       # 贪心动作 (argmax)
-    prob=None,           # 动作概率分布
-    value=None,          # 状态价值 (多头)
+    action=None,         # 动作索引 (0-15)
+    d_action=None,       # 贪心动作 (DQN中与action相同)
+    prob=None,           # 动作概率分布 (DQN中不使用)
+    value=None,          # 状态价值
+    move_dir=None,       # 移动方向 (0-7, 来自agent_target_dqn)
+    use_talent=None,     # 是否使用闪现 (0或1, 来自agent_target_dqn)
 )
 
 
 SampleData = create_cls(
     "SampleData",
-    obs=Config.FEATURE_DIM,           # 观测特征维度
-    legal_action=Config.ACTION_NUM,    # 合法动作掩码维度
-    act=1,                             # 执行动作
-    prob=Config.ACTION_NUM,            # 动作概率
-    reward=1,                          # 即时奖励 (标量)
-    value=1,                           # 状态价值 (标量)
-    next_value=1,                      # 下一状态价值
-    advantage=1,                       # 优势函数
-    reward_sum=1,                      # 回报和
-    done=1,                            # 是否结束
-    map_tensor=None,                   # 4通道51x51地图张量 (可选)
+    obs=None,           # 观测特征 [DIM_OF_OBSERVATION]
+    _obs=None,          # 下一状态观测 [DIM_OF_OBSERVATION]
+    obs_legal=None,     # 合法动作掩码 [ACTION_NUM]
+    _obs_legal=None,    # 下一状态合法动作掩码 [ACTION_NUM]
+    act=None,           # 执行动作 (int)
+    rew=None,           # 即时奖励 (float)
+    ret=None,           # 返回值 (float, 备用)
+    done=None,          # 是否结束 (float)
 )
 
 
@@ -203,12 +202,19 @@ def reward_shaping(
     _obs
 ):
     """
-    奖励塑形函数 - 稀疏奖励版本 (参考亚军方案 kaiwu_taichu-2025)
+    奖励塑形函数 - 完整密集奖励版本 (完全复制 agent_target_dqn)
 
-    简化策略：
-    1. 每步小额惩罚 (-0.02)，鼓励高效行动
-    2. 只有终局有大奖励/惩罚
-    3. 让模型自己学习生存和收集策略
+    10个奖励组件：
+    1. 终点奖励 (REW_FINISH)
+    2. 截断惩罚 (REW_TRUNCATED_PUNISH)
+    3. 宝箱奖励/惩罚 (REW_TREASURE)
+    4. 闪现距离惩罚 (REW_FLASH)
+    5. 撞墙惩罚 (REW_HIT_WALL_PUNISH)
+    6. Buff奖励 (REW_BUFF)
+    7. 每步惩罚 (REW_EACH_STEP_PUNISH)
+    8. 距离奖励 (REW_DISTANCE)
+    9. 周围重复步数惩罚 (REW_MEMORY_PUNISH)
+    10. 探索奖励 (REW_EXPLORATION)
 
     Args:
         frame_no: 当前帧号
@@ -223,35 +229,65 @@ def reward_shaping(
     Returns:
         reward: numpy数组 [总奖励]
     """
-    # ============ 稀疏奖励核心：只有基础惩罚 + 终局奖励 ============
+    r = 0.0
 
-    # 每步惩罚（很小，让模型有紧迫感但不过度惩罚生存）
-    # 亚军方案: -0.02/步
-    r = -0.02
+    if remain_info is None:
+        return np.array([0.0], dtype=np.float32)
 
-    # 撞墙惩罚（可选，如果信息可用）
-    # hit_wall = remain_info.get('hit_wall', False)
-    # if hit_wall:
-    #     r -= 0.1
-
-    # 终局奖励（稀疏奖励的主要来源）
+    # ---------- 1. 终点奖励 ----------
     if terminated:
-        r += Config.DEATH_PENALTY  # -10
-    elif truncated:
-        r += Config.WIN_REWARD     # +10
+        r += Config.REW_FINISH
 
-    # ============ 注释掉的密集奖励（供参考） ============
-    """
-    # 以下奖励被注释掉，采用稀疏奖励策略：
-    # - 宝箱收集奖励
-    # - Buff收集奖励
-    # - 距离塑形奖励
-    # - 情景奖励
-    # - 记忆惩罚
-    #
-    # 原理：让模型自己从终局奖励中学习长期策略，
-    # 而不是被人为设计的密集奖励引导
-    """
+    # ---------- 2. 截断惩罚 ----------
+    if truncated:
+        r -= Config.REW_TRUNCATED_PUNISH
+
+    # ---------- 3. 宝箱奖励/惩罚 (遗漏惩罚在终局时处理) ----------
+    treasure_collected = remain_info.get('treasure_collected', 0)
+    r += treasure_collected * Config.REW_TREASURE * 0.1  # 每收集一个宝箱有小奖励
+
+    # ---------- 4. 闪现使用奖励/惩罚 ----------
+    flash_used = remain_info.get('flash_used', False)
+    danger_level = remain_info.get('danger_level', 0)
+    if flash_used:
+        if danger_level > Config.DANGER_THRESHOLD_HIGH:
+            r += 0.5  # 危险时使用闪现是正确决策
+        else:
+            r -= 0.1  # 安全时使用闪现略有惩罚
+
+    # ---------- 5. 撞墙惩罚 ----------
+    hit_wall = remain_info.get('hit_wall', False)
+    if hit_wall:
+        r -= Config.REW_HIT_WALL_PUNISH
+
+    # ---------- 6. Buff奖励 ----------
+    buff_count = remain_info.get('buff_count', 0)
+    r += buff_count * Config.REW_BUFF * 0.1
+
+    # ---------- 7. 每步惩罚 ----------
+    r -= Config.REW_EACH_STEP_PUNISH
+
+    # ---------- 8. 距离奖励 (向目标移动) ----------
+    # 使用最近的宝箱距离变化
+    nearest_treasure_dist = remain_info.get('nearest_treasure_dist', 999)
+    if nearest_treasure_dist < 180:
+        # 归一化距离奖励 (越近越好)
+        r += (1.0 - min(nearest_treasure_dist / 180.0, 1.0)) * 0.01
+
+    # ---------- 9. 周围重复步数惩罚 ----------
+    around_memory = remain_info.get('around_memory', np.zeros((Config.REW_MEMORY_PUNISH_SIZE, Config.REW_MEMORY_PUNISH_SIZE)))
+    memory_sum = np.sum(around_memory)
+    r -= min(
+        max(memory_sum - Config.REW_MEMORY_PUNISH_THRESHOLD, 0.0) * Config.REW_MEMORY_PUNISH_COEF,
+        1.0
+    )
+
+    # ---------- 10. 探索奖励 ----------
+    new_explore_grid = remain_info.get('new_explore_grid', 0)
+    r += new_explore_grid * Config.REW_EXPLORATION
+
+    # 全局缩放
+    r *= Config.REW_GLOBAL_SCALE
 
     return np.array([r], dtype=np.float32)
 
@@ -308,65 +344,33 @@ def _calc_gae(list_sample_data, train_step=0):
 # 注意：峡谷追猎是单机训练，这些函数不会被调用
 # 移除 @attached 装饰器以避免远程环境导入问题
 
-def SampleData2NumpyData(sample):
-    """将SampleData转换为numpy数组用于网络传输"""
-    data = np.concatenate([
-        sample.obs.flatten(),
-        sample.legal_action.flatten(),
-        np.array([sample.act]),
-        sample.prob.flatten(),
-        sample.reward.flatten(),
-        sample.value.flatten(),
-        sample.next_value.flatten(),
-        sample.advantage.flatten(),
-        sample.reward_sum.flatten(),
-        np.array([sample.done]),
-    ])
-    return data
+def SampleData2NumpyData(g_data):
+    """将SampleData转换为numpy数组用于网络传输 (与agent_target_dqn一致)"""
+    return np.hstack(
+        (
+            np.array(g_data.obs, dtype=np.float32),
+            np.array(g_data._obs, dtype=np.float32),
+            np.array(g_data.obs_legal, dtype=np.float32),
+            np.array(g_data._obs_legal, dtype=np.float32),
+            np.array(g_data.act, dtype=np.float32),
+            np.array(g_data.rew, dtype=np.float32),
+            np.array(g_data.ret, dtype=np.float32),
+            np.array(g_data.done, dtype=np.float32),
+        )
+    )
 
 
-def NumpyData2SampleData(data):
-    """将numpy数组转换回SampleData"""
-    idx = 0
-
-    obs = data[idx:idx + Config.FEATURE_DIM].astype(np.float32)
-    idx += Config.FEATURE_DIM
-
-    legal_action = data[idx:idx + Config.ACTION_NUM].astype(np.float32)
-    idx += Config.ACTION_NUM
-
-    act = int(data[idx])
-    idx += 1
-
-    prob = data[idx:idx + Config.ACTION_NUM].astype(np.float32)
-    idx += Config.ACTION_NUM
-
-    reward = data[idx:idx + 1].astype(np.float32)
-    idx += 1
-
-    value = data[idx:idx + 1].astype(np.float32)
-    idx += 1
-
-    next_value = data[idx:idx + 1].astype(np.float32)
-    idx += 1
-
-    advantage = data[idx:idx + 1].astype(np.float32)
-    idx += 1
-
-    reward_sum = data[idx:idx + 1].astype(np.float32)
-    idx += 1
-
-    done = float(data[idx])
-
+def NumpyData2SampleData(s_data):
+    """将numpy数组转换回SampleData (与agent_target_dqn一致)"""
+    obs_data_size = Config.DIM_OF_OBSERVATION
+    legal_data_size = Config.ACTION_NUM
     return SampleData(
-        obs=obs,
-        legal_action=legal_action,
-        act=act,
-        prob=prob,
-        reward=reward,
-        value=value,
-        next_value=next_value,
-        advantage=advantage,
-        reward_sum=reward_sum,
-        done=done,
+        obs=s_data[:obs_data_size],
+        _obs=s_data[obs_data_size:2*obs_data_size],
+        obs_legal=s_data[2*obs_data_size:2*obs_data_size+legal_data_size],
+        _obs_legal=s_data[2*obs_data_size+legal_data_size:2*obs_data_size+2*legal_data_size],
+        act=s_data[-4],
+        rew=s_data[-3],
+        ret=s_data[-2],
+        done=s_data[-1],
     )

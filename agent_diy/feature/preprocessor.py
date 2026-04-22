@@ -7,99 +7,70 @@
 Author: Tencent AI Arena Authors
 
 峡谷追猎 - DIY Agent 特征预处理器
-优化版本：课程学习 + 情景判断 + 完整特征工程
+完全参考 agent_target_dqn 亚军方案
+
+特征格式:
+- 英雄特征 (5D): pos_x_norm, pos_z_norm, flash_status, flash_cd_norm, buff_remain_time_norm
+- 地图特征 (4x51x51 = 10404D): 障碍物、访问记忆、宝箱/Buff、终点
 """
 
 import numpy as np
+import math
 from agent_diy.conf.conf import Config
-
-# 地图常量
-MAP_SIZE = Config.MAP_SIZE
-MAX_DIST_BUCKET = Config.MAX_DIST_BUCKET
-MAX_FLASH_CD = Config.MAX_FLASH_CD
-MAX_BUFF_DURATION = Config.MAX_BUFF_DURATION
-MAX_MONSTER_SPEED = Config.MAX_MONSTER_SPEED
-
-
-def _norm(v, v_max, v_min=0.0):
-    """将值归一化到 [0, 1]"""
-    v = float(np.clip(v, v_min, v_max))
-    return (v - v_min) / (v_max - v_min) if (v_max - v_min) > 1e-6 else 0.0
-
-
-def _calc_distance_bucket(raw_dist):
-    """计算距离桶编号 0-5"""
-    if raw_dist < 30:
-        return 0
-    elif raw_dist < 60:
-        return 1
-    elif raw_dist < 90:
-        return 2
-    elif raw_dist < 120:
-        return 3
-    elif raw_dist < 150:
-        return 4
-    else:
-        return 5
-
-
-def _calc_relative_direction(hero_pos, target_pos):
-    """
-    计算目标相对于英雄的方位 0-8
-    0=重叠, 1=东, 2=东北, 3=北, 4=西北, 5=西, 6=西南, 7=南, 8=东南
-    """
-    dx = target_pos['x'] - hero_pos['x']
-    dz = target_pos['z'] - hero_pos['z']
-
-    if abs(dx) < 1e-6 and abs(dz) < 1e-6:
-        return 0
-
-    # 计算角度 (弧度)
-    angle = np.arctan2(-dz, dx)  # 注意: z轴向下为正，所以取反
-
-    # 转换为 0-8 方向 (每45度一个扇区)
-    direction = int((angle + np.pi / 8) / (np.pi / 4)) % 8 + 1
-    return direction
 
 
 class Preprocessor:
-    """特征预处理器 - 课程学习 + 情景判断"""
+    """
+    特征预处理器 - 完全复制agent_target_dqn的StateManager逻辑
+    """
 
     def __init__(self):
         self.reset()
 
     def reset(self):
         """重置状态"""
-        self.step_no = 0
+        self.step = 0
         self.max_step = 1000
-        self.last_min_monster_dist_norm = 0.5
-        self.last_nearest_treasure_dist_norm = 1.0
+        self.last_action = -1
+
+        # 128x128全局地图 (参考agent_target_dqn)
+        self.obstacles = np.full((128, 128), -1.0, np.float32)  # -1=未知, 0=障碍, 1=通路
+        self.memory = np.zeros((128, 128), np.float32)  # 访问次数
+        self.buff_treasures = np.zeros((128, 128), np.float32)  # 宝箱/Buff
+        self.end = np.zeros((128, 128), np.float32)  # 终点
+
+        # 物件位置记录 (用于更新地图)
+        self.avail_treasures = [False] * 13
+        self.avail_buff = False
+        self.last_pos_treasures = [None] * 13
+        self.last_pos_buff = None
+        self.last_pos_end = None
+
+        # 英雄位置
+        self.hero_pos = np.array([0, 0], np.int32)
+
+        # 统计
+        self.buff_count = 0
         self.treasure_collected = 0
-        self.flash_used_in_step = False
+        self.hit_wall = False
+        self.last_hero_pos = None
 
-        # 历史记录 (用于GRU和时序判断)
-        self.position_history = []  # 位置历史
-        self.danger_history = []    # 危险等级历史
-        self.max_history_len = 10
-
-        # 访问记忆地图 (128x128全局，参考亚军)
-        self.visit_memory = np.zeros((128, 128), dtype=np.float32)
-        self.hero_pos = (0, 0)  # 当前英雄位置
-
-        # 全局地图状态 (128x128)
-        self.global_obstacles = np.full((128, 128), -1.0, np.float32)  # -1=未知
-        self.global_treasures = np.zeros((128, 128), np.float32)  # 0.5=大致, 1=精确
-        self.global_buffs = np.zeros((128, 128), np.float32)  # -0.5=大致, -1=精确 (负数)
-
-        # 情景判断状态
-        self.was_in_danger = False  # 上一步是否在危险中
-        self.escape_count = 0       # 成功逃脱次数
-        self.flash_waste_count = 0  # 浪费闪现次数
+        # 闪现相关
+        self.talent_max_cd = 0
 
     def feature_process(self, env_obs, last_action):
         """
-        处理环境观测，返回特征向量、合法动作掩码、奖励相关信息
-        包含课程学习阶段的判断
+        处理环境观测，返回特征向量和合法动作掩码
+
+        Args:
+            env_obs: 环境观测
+            last_action: 上一帧动作
+
+        Returns:
+            feature: [DIM_OF_OBSERVATION] 特征向量 (5 + 10404 = 10409D)
+            legal_action: [ACTION_NUM] 合法动作掩码
+            remain_info: 额外信息用于奖励计算
+            map_tensor: [4, 51, 51] 地图张量 (与特征中的地图部分一致)
         """
         observation = env_obs["observation"]
         frame_state = observation["frame_state"]
@@ -107,531 +78,487 @@ class Preprocessor:
         map_info = observation["map_info"]
         legal_act_raw = observation["legal_action"]
 
-        self.step_no = observation["step_no"]
+        self.step = observation["step_no"]
         self.max_step = env_info.get("max_step", 1000)
+        self.last_action = last_action
 
-        # 计算课程学习阶段
-        progress_ratio = self.step_no / self.max_step
-        is_early_phase = progress_ratio < Config.EARLY_PHASE_RATIO
-        is_late_phase = progress_ratio > (1 - Config.LATE_PHASE_RATIO)
+        # 获取英雄信息 (按照官方文档: heroes是HeroState对象)
+        # 官方文档HeroState字段: hero_id, pos, treasure_score, step_score, treasure_collected_count
+        hero_info = frame_state.get("heroes", {})
 
-        # 获取英雄状态
-        hero = frame_state["heroes"]
-        hero_pos = hero["pos"]
+        # 确保必要字段存在
+        if not hero_info or "pos" not in hero_info:
+            hero_info = {"pos": {"x": 64, "z": 64}}
 
-        # 更新历史
-        self.position_history.append((hero_pos['x'], hero_pos['z']))
-        if len(self.position_history) > self.max_history_len:
-            self.position_history.pop(0)
+        hero_pos = np.array([hero_info["pos"]["x"], hero_info["pos"]["z"]], np.float32)
 
-        # ==================== 英雄特征 (6D) ====================
-        hero_feat = self._process_hero_features(hero)
+        # 官方文档 HeroState 只有: hero_id, pos, treasure_score, step_score, treasure_collected_count
+        # 没有 talent 和 buff_remain_time 字段
+        # 从 env_info 获取闪现信息 (官方文档规定)
+        flash_cooldown = env_info.get("flash_cooldown", 0)
+        collected_buff = env_info.get("collected_buff", 0)
 
-        # ==================== 怪物特征 (6D x 2) ====================
-        monsters = frame_state.get("monsters", [])
-        monster_feats = self._process_monster_features(monsters, hero_pos)
+        # 更新闪现最大cd (用于归一化)
+        self.talent_max_cd = max(self.talent_max_cd, flash_cooldown)
 
-        # ==================== 宝箱特征 (6D x 10) ====================
-        organs = frame_state.get("organs", [])
-        treasure_feats, treasure_info = self._process_treasure_features(organs, hero_pos)
+        # 更新地图
+        self._update_map(hero_pos, map_info, frame_state.get("organs", []))
 
-        # ==================== Buff特征 (6D x 2) ====================
-        buff_feats, buff_info = self._process_buff_features(organs, hero_pos)
+        # 计算英雄特征 (5D) - 传入env_info获取flash信息
+        hero_feature = self._get_hero_feature(hero_info, flash_cooldown, collected_buff)
 
-        # ==================== 地图特征 (25D) ====================
-        map_feat = self._process_map_features(map_info, hero_pos)
+        # 计算周围51x51地图特征 (4x51x51 = 10404D)
+        map_feature = self._get_around_feature(size=51)
 
-        # ==================== 合法动作掩码 (16D) ====================
-        legal_action = self._process_legal_actions(legal_act_raw)
+        # 拼接特征: [5D英雄 + 10404D地图]
+        feature = np.concatenate([hero_feature, map_feature.flatten()], dtype=np.float32)
 
-        # ==================== 进度特征 (4D) ====================
-        progress_feat, danger_level = self._process_progress_features(
-            env_info, monsters, hero_pos, progress_ratio
-        )
+        # 计算合法动作掩码
+        legal_action = self._get_legal_actions(legal_act_raw, flash_cooldown)
 
-        # 更新危险历史
-        self.danger_history.append(danger_level)
-        if len(self.danger_history) > self.max_history_len:
-            self.danger_history.pop(0)
+        # 计算撞墙
+        self.hit_wall = self._check_hit_wall(hero_pos)
+        self.last_hero_pos = hero_pos.copy()
 
-        # 判断是否成功逃脱
-        escaped = self.was_in_danger and danger_level < Config.DANGER_THRESHOLD_LOW
-        if escaped:
-            self.escape_count += 1
+        # 构建remain_info用于奖励计算
+        remain_info = self._build_remain_info(env_info, hero_info, hero_pos)
 
-        # 判断闪现是否浪费
-        flash_wasted = self.flash_used_in_step and self.was_in_danger == False and danger_level < Config.DANGER_THRESHOLD_LOW
-        if flash_wasted:
-            self.flash_waste_count += 1
-
-        self.was_in_danger = danger_level > Config.DANGER_THRESHOLD_HIGH
-
-        # 拼接所有特征 (非地图特征)
-        feature = np.concatenate([
-            hero_feat,
-            *monster_feats,
-            *treasure_feats,
-            *buff_feats,
-            map_feat,
-            progress_feat,
-            np.array(legal_action, dtype=np.float32),
-        ])
-
-        # ==================== 构建4通道51x51地图张量 ====================
-        map_tensor = self.build_map_tensor(map_info, hero_pos, organs, monsters)
-
-        # 记录是否使用了闪现
-        self.flash_used_in_step = (last_action >= 8) if last_action >= 0 else False
-
-        # 构建奖励相关信息 (包含课程学习阶段)
-        # 计算周围记忆和
-        around_memory_sum = self._calc_around_memory_sum()
-
-        # 计算最近Buff距离 (用于奖励引导)
-        nearest_buff_dist = 1.0
-        buff_in_view = False
-        for b in buff_feats:
-            if b[0] > 0:  # is_active > 0
-                nearest_buff_dist = b[4]  # dist_norm
-                buff_in_view = True
-                break
-
-        remain_info = {
-            'min_monster_dist_norm': min(
-                [m[4] for m in monster_feats if m[0] > 0] or [1.0]
-            ),
-            'nearest_treasure_dist_norm': treasure_info['nearest_dist_norm'],
-            'treasure_collected': treasure_info['collected_count'],
-            'danger_level': danger_level,
-            'flash_used': self.flash_used_in_step,
-            # Buff信息
-            'buff_collected': buff_info.get('collected_count', 0),
-            'nearest_buff_dist_norm': nearest_buff_dist,
-            'nearest_buff_in_view': buff_in_view,
-            # 记忆惩罚相关
-            'around_memory_sum': around_memory_sum,
-            # 课程学习阶段
-            'is_early_phase': is_early_phase,
-            'is_late_phase': is_late_phase,
-            'progress_ratio': progress_ratio,
-            # 情景判断
-            'escaped': escaped,
-            'flash_wasted': flash_wasted,
-            'was_in_danger': self.was_in_danger,
-            'escape_count': self.escape_count,
-            # 历史信息
-            'position_history': self.position_history.copy(),
-            'danger_history': self.danger_history.copy(),
-            # 怪物具体信息用于情景奖励
-            'nearest_monster_dist': min(
-                [(m[4], i) for i, m in enumerate(monster_feats) if m[0] > 0],
-                key=lambda x: x[0], default=(1.0, -1)
-            )[0],
-        }
-
-        # 更新上一帧距离
-        self.last_min_monster_dist_norm = remain_info['min_monster_dist_norm']
-        self.last_nearest_treasure_dist_norm = remain_info['nearest_treasure_dist_norm']
+        # 地图张量 (4, 51, 51)
+        map_tensor = self._get_map_tensor(size=51)
 
         return feature, legal_action, remain_info, map_tensor
 
-    def _process_hero_features(self, hero):
-        """处理英雄特征 (6D)"""
-        hero_pos = hero["pos"]
+    def _get_hero_feature(self, hero_info, flash_cooldown=0, collected_buff=0):
+        """
+        计算英雄特征 (5D)
+        1. pos_x_norm: x坐标归一化到(-1, 1)
+        2. pos_z_norm: z坐标归一化到(-1, 1)
+        3. flash_status: 闪现是否可用 (0或1) - cooldown==0时可用
+        4. flash_cd_norm: 闪现cd归一化到(0, 1)
+        5. buff_count_norm: buff收集次数归一化
+        """
+        pos = hero_info["pos"]
 
-        hero_x_norm = _norm(hero_pos["x"], MAP_SIZE)
-        hero_z_norm = _norm(hero_pos["z"], MAP_SIZE)
+        # 归一化到(-1, 1)
+        pos_x_norm = (pos["x"] - 64) / 64.0  # 128x128地图中心在64
+        pos_z_norm = (pos["z"] - 64) / 64.0
 
-        flash_cd = hero.get("flash_cooldown", 0)
-        flash_cd_norm = _norm(flash_cd, MAX_FLASH_CD)
-        flash_ready = 1.0 if flash_cd <= 0 else 0.0
+        # 从 env_info 获取的 flash_cooldown
+        flash_status = 1.0 if flash_cooldown == 0 else 0.0
+        flash_cd_norm = flash_cooldown / self.talent_max_cd if self.talent_max_cd > 0 else 0.0
 
-        # 闪现即将可用 (用于决策)
-        flash_soon = 1.0 if 0 < flash_cd <= Config.FLASH_CD_THRESHOLD else 0.0
-
-        buff_remain = hero.get("buff_remaining_time", 0)
-        buff_remain_norm = _norm(buff_remain, MAX_BUFF_DURATION)
-        speed_boost = 1.0 if buff_remain > 0 else 0.0
+        # buff收集次数 (官方文档没有buff_remain_time，用collected_buff代替)
+        buff_count_norm = min(collected_buff / 2.0, 1.0)  # 假设最多2个buff
 
         return np.array([
-            hero_x_norm,
-            hero_z_norm,
+            pos_x_norm,
+            pos_z_norm,
+            flash_status,
             flash_cd_norm,
-            flash_ready,
-            buff_remain_norm,
-            speed_boost,
+            buff_count_norm,
         ], dtype=np.float32)
 
-    def _process_monster_features(self, monsters, hero_pos):
-        """处理怪物特征 (6D x 2)"""
-        monster_feats = []
-
-        for i in range(Config.MONSTER_COUNT):
-            if i < len(monsters):
-                m = monsters[i]
-                is_in_view = float(m.get("is_in_view", 0))
-                m_pos = m["pos"]
-
-                if is_in_view > 0:
-                    m_x_norm = _norm(m_pos["x"], MAP_SIZE)
-                    m_z_norm = _norm(m_pos["z"], MAP_SIZE)
-                    m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
-
-                    raw_dist = np.sqrt(
-                        (hero_pos["x"] - m_pos["x"]) ** 2 +
-                        (hero_pos["z"] - m_pos["z"]) ** 2
-                    )
-                    dist_bucket = _calc_distance_bucket(raw_dist)
-                    dist_norm = _norm(dist_bucket, MAX_DIST_BUCKET)
-
-                    rel_dir = _calc_relative_direction(hero_pos, m_pos)
-                    rel_dir_norm = _norm(rel_dir, 8)
-                else:
-                    m_x_norm = 0.0
-                    m_z_norm = 0.0
-                    m_speed_norm = 0.0
-                    dist_norm = 1.0
-                    rel_dir_norm = 0.0
-
-                monster_feats.append(np.array([
-                    is_in_view,
-                    m_x_norm,
-                    m_z_norm,
-                    m_speed_norm,
-                    dist_norm,
-                    rel_dir_norm,
-                ], dtype=np.float32))
-            else:
-                monster_feats.append(np.zeros(Config.MONSTER_FEATURE_DIM, dtype=np.float32))
-
-        return monster_feats
-
-    def _process_treasure_features(self, organs, hero_pos):
-        """处理宝箱特征 (6D x 10)"""
-        treasure_feats = []
-        active_treasures = []
-
-        for organ in organs:
-            if organ.get("sub_type") == 1:  # 1=宝箱
-                active_treasures.append(organ)
-
-        treasure_distances = []
-        for t in active_treasures:
-            t_pos = t["pos"]
-            dist = np.sqrt(
-                (hero_pos["x"] - t_pos["x"]) ** 2 +
-                (hero_pos["z"] - t_pos["z"]) ** 2
-            )
-            treasure_distances.append((dist, t))
-
-        treasure_distances.sort(key=lambda x: x[0])
-        nearest_treasures = treasure_distances[:Config.TREASURE_COUNT]
-
-        nearest_dist_norm = 1.0
-        for i in range(Config.TREASURE_COUNT):
-            if i < len(nearest_treasures):
-                dist, t = nearest_treasures[i]
-                t_pos = t["pos"]
-
-                is_active = 1.0 if t.get("status") == 1 else 0.0
-                t_x_norm = _norm(t_pos["x"], MAP_SIZE)
-                t_z_norm = _norm(t_pos["z"], MAP_SIZE)
-
-                dist_bucket = _calc_distance_bucket(dist)
-                dist_norm = _norm(dist_bucket, MAX_DIST_BUCKET)
-
-                if i == 0:
-                    nearest_dist_norm = dist_norm
-
-                rel_dir = _calc_relative_direction(hero_pos, t_pos)
-                rel_dir_norm = _norm(rel_dir, 8)
-
-                priority = 1.0 - dist_norm
-
-                treasure_feats.append(np.array([
-                    is_active,
-                    t_x_norm,
-                    t_z_norm,
-                    dist_norm,
-                    rel_dir_norm,
-                    priority,
-                ], dtype=np.float32))
-            else:
-                treasure_feats.append(np.zeros(Config.TREASURE_FEATURE_DIM, dtype=np.float32))
-
-        info = {
-            'nearest_dist_norm': nearest_dist_norm,
-            'collected_count': Config.TREASURE_COUNT - len(active_treasures),
-        }
-
-        return treasure_feats, info
-
-    def _process_buff_features(self, organs, hero_pos):
-        """处理Buff特征 (6D x 2)"""
-        buff_feats = []
-        active_buffs = []
-
-        for organ in organs:
-            if organ.get("sub_type") == 2:  # 2=加速buff
-                active_buffs.append(organ)
-
-        buff_distances = []
-        for b in active_buffs:
-            b_pos = b["pos"]
-            dist = np.sqrt(
-                (hero_pos["x"] - b_pos["x"]) ** 2 +
-                (hero_pos["z"] - b_pos["z"]) ** 2
-            )
-            buff_distances.append((dist, b))
-
-        buff_distances.sort(key=lambda x: x[0])
-        nearest_buffs = buff_distances[:Config.BUFF_COUNT]
-
-        for i in range(Config.BUFF_COUNT):
-            if i < len(nearest_buffs):
-                dist, b = nearest_buffs[i]
-                b_pos = b["pos"]
-
-                is_active = 1.0 if b.get("status") == 1 else 0.0
-                b_x_norm = _norm(b_pos["x"], MAP_SIZE)
-                b_z_norm = _norm(b_pos["z"], MAP_SIZE)
-
-                dist_bucket = _calc_distance_bucket(dist)
-                dist_norm = _norm(dist_bucket, MAX_DIST_BUCKET)
-
-                rel_dir = _calc_relative_direction(hero_pos, b_pos)
-                rel_dir_norm = _norm(rel_dir, 8)
-                remaining_time_norm = 1.0
-
-                buff_feats.append(np.array([
-                    is_active,
-                    b_x_norm,
-                    b_z_norm,
-                    dist_norm,
-                    rel_dir_norm,
-                    remaining_time_norm,
-                ], dtype=np.float32))
-            else:
-                buff_feats.append(np.zeros(Config.BUFF_FEATURE_DIM, dtype=np.float32))
-
-        # 统计已收集Buff数量 (总数2 - 剩余数)
-        collected_count = Config.BUFF_COUNT - len(active_buffs)
-
-        return buff_feats, {'collected_count': collected_count}
-
-    def _calc_around_memory_sum(self):
-        """计算周围3x3区域的访问次数总和"""
-        hx, hz = self.hero_pos
-        offset = Config.REW_MEMORY_PUNISH_SIZE // 2  # 1 for size 3
-
-        total = 0.0
-        for dz in range(-offset, offset + 1):
-            for dx in range(-offset, offset + 1):
-                x = hx + dx
-                z = hz + dz
-                if 0 <= x < 128 and 0 <= z < 128:
-                    total += self.visit_memory[z, x]
-
-        return total
-
-    def _process_map_features(self, map_info, hero_pos):
-        """处理局部地图特征 (25D) - 5x5区域"""
-        map_feat = np.zeros(Config.MAP_LOCAL_DIM, dtype=np.float32)
-
-        if map_info is None or len(map_info) == 0:
-            return map_feat
-
-        center = len(map_info) // 2
-        offset = 2
-
-        flat_idx = 0
-        for row in range(center - offset, center + offset + 1):
-            for col in range(center - offset, center + offset + 1):
-                if 0 <= row < len(map_info) and 0 <= col < len(map_info[0]):
-                    map_feat[flat_idx] = float(map_info[row][col] != 0)
-                flat_idx += 1
-
-        return map_feat
-
-    def _update_global_maps(self, hero_pos, map_info, organs):
-        """更新128x128全局地图 (参考亚军)"""
-        hx, hz = int(hero_pos['x']), int(hero_pos['z'])
-        self.hero_pos = (hx, hz)
+    def _update_map(self, hero_pos, map_info, organs):
+        """更新128x128全局地图"""
+        self.hero_pos = hero_pos.astype(np.int32)
 
         # 更新访问记忆
+        hx, hz = self.hero_pos
         if 0 <= hx < 128 and 0 <= hz < 128:
-            self.visit_memory[hz, hx] += 1.0
+            self.memory[hz, hx] += 1.0
 
-        # 更新障碍物 (21x21视野)
-        if map_info is not None:
-            local_center = len(map_info) // 2
-            for i in range(len(map_info)):
-                for j in range(len(map_info[0])):
-                    gx = hx + i - local_center
-                    gz = hz + j - local_center
-                    if 0 <= gx < 128 and 0 <= gz < 128:
-                        # 1=可通行, 0=障碍
-                        self.global_obstacles[gz, gx] = float(map_info[i][j] != 0)
+        # 更新障碍物和新探索区域
+        self._update_obstacles(hero_pos, map_info)
 
-        # 更新宝箱和Buff位置
+        # 更新物件 (宝箱、Buff、终点)
         for organ in organs:
             sub_type = organ.get("sub_type")
-            pos = organ.get("pos", {})
-            ox, oz = int(pos.get("x", 0)), int(pos.get("z", 0))
-            is_in_view = organ.get("is_in_view", 0)
-            status = organ.get("status", 0)
+            if sub_type == 1:  # 宝箱
+                self._update_treasure(organ, hero_pos)
+            elif sub_type == 2:  # Buff
+                self._update_buff(organ, hero_pos)
+            elif sub_type == 4:  # 终点
+                self._update_end(organ, hero_pos)
 
-            # 视野外时，用relative_pos估算
-            if is_in_view == 0 and 'relative_pos' in organ:
-                rel = organ['relative_pos']
-                dist_bucket = rel.get('l2_distance', 5)
-                direction = rel.get('direction', 0)
-                # 估算距离和位置
-                est_dist = [15, 45, 75, 105, 135, 165][min(dist_bucket, 5)]
-                angle = (direction - 1) * 45 if direction > 0 else 0
-                import math
-                dx = est_dist * math.cos(math.radians(angle))
-                dz = est_dist * math.sin(math.radians(angle))
-                ox = int(hx + dx)
-                oz = int(hz + dz)
+    def _update_obstacles(self, hero_pos, map_info):
+        """更新障碍物信息"""
+        if map_info is None or len(map_info) == 0:
+            return
 
-            if 0 <= ox < 128 and 0 <= oz < 128:
-                if sub_type == 1:  # 宝箱
-                    if is_in_view > 0 and status == 1:
-                        self.global_treasures[oz, ox] = 1.0  # 精确
-                    else:
-                        self.global_treasures[oz, ox] = max(self.global_treasures[oz, ox], 0.5)  # 大致
-                elif sub_type == 2:  # Buff (负数)
-                    if is_in_view > 0 and status == 1:
-                        self.global_buffs[oz, ox] = -1.0  # 精确
-                    else:
-                        self.global_buffs[oz, ox] = min(self.global_buffs[oz, ox], -0.5)  # 大致
+        hero_pos = hero_pos.astype(np.int32)
 
-    def build_map_tensor(self, map_info, hero_pos, organs, monsters):
-        """
-        构建4通道51x51地图张量 (从128x128全局地图裁剪，参考亚军)
-
-        通道0: 障碍物 (-1=未知, 0=障碍, 1=通路)
-        通道1: 访问记忆 (0-1, 访问次数归一化)
-        通道2: 宝箱+Buff (0=无, 0.5=宝箱大致, 1=宝箱精确, -0.5=Buff大致, -1=Buff精确)
-        通道3: 怪物 (0=无, 0.5=大致, 1=精确)
-
-        Args:
-            map_info: 局部地图信息 (21x21)
-            hero_pos: 英雄位置 {'x', 'z'}
-            organs: 物件列表 (宝箱、Buff)
-            monsters: 怪物列表
-
-        Returns:
-            map_tensor: [4, 51, 51] numpy数组
-        """
-        # 首先更新全局地图
-        self._update_global_maps(hero_pos, map_info, organs)
-
-        # 从128x128全局地图裁剪51x51区域
-        hx, hz = int(hero_pos['x']), int(hero_pos['z'])
-        half_size = 25  # 51//2
-
-        map_tensor = np.zeros((4, 51, 51), dtype=np.float32)
-
-        for i in range(51):
-            for j in range(51):
-                # 全局坐标
-                gx = hx + j - half_size
-                gz = hz + i - half_size
-
-                if 0 <= gx < 128 and 0 <= gz < 128:
-                    # 通道0: 障碍物
-                    map_tensor[0, i, j] = self.global_obstacles[gz, gx]
-
-                    # 通道1: 访问记忆 (归一化)
-                    map_tensor[1, i, j] = min(self.visit_memory[gz, gx] / 10.0, 1.0)
-
-                    # 通道2: 宝箱+Buff (合并，符号区分)
-                    # 正数=宝箱, 负数=Buff
-                    treasure_val = self.global_treasures[gz, gx]
-                    buff_val = self.global_buffs[gz, gx]
-                    if treasure_val > 0:
-                        map_tensor[2, i, j] = treasure_val
-                    elif buff_val < 0:
-                        map_tensor[2, i, j] = buff_val
-
-                    # 通道3: 怪物
-                    # 简化处理：在视野内的怪物标记为1
-                    for m in monsters:
-                        if m.get('is_in_view', 0):
-                            mx = int(m['pos']['x'])
-                            mz = int(m['pos']['z'])
-                            if gx == mx and gz == mz:
-                                map_tensor[3, i, j] = 1.0
-                                break
-                else:
-                    # 超出地图范围标记为-1 (未知)
-                    map_tensor[0, i, j] = -1.0
-
-        return map_tensor
-
-    def _process_legal_actions(self, legal_act_raw):
-        """处理合法动作掩码 (16D)"""
-        legal_action = [1] * Config.ACTION_NUM
-
-        if isinstance(legal_act_raw, list) and legal_act_raw:
-            if isinstance(legal_act_raw[0], bool):
-                for j in range(min(Config.ACTION_NUM, len(legal_act_raw))):
-                    legal_action[j] = int(legal_act_raw[j])
-            else:
-                valid_set = {int(a) for a in legal_act_raw if int(a) < Config.ACTION_NUM}
-                legal_action = [1 if j in valid_set else 0 for j in range(Config.ACTION_NUM)]
-
-        if sum(legal_action) == 0:
-            legal_action = [1] * Config.ACTION_NUM
-
-        return legal_action
-
-    def _process_progress_features(self, env_info, monsters, hero_pos, progress_ratio):
-        """处理进度特征 (4D) - 包含课程学习阶段"""
-        step_norm = _norm(self.step_no, self.max_step)
-        survival_ratio = step_norm
-
-        monster_interval = env_info.get("monster_interval", 300)
-        monster2_timer = _norm(max(0, monster_interval - self.step_no), monster_interval)
-
-        # 危险等级计算
-        danger_level = 0.0
-        min_dist = float('inf')
-        monster_speed = 1
-
-        if monsters:
-            for m in monsters:
-                if m.get("is_in_view", 0):
-                    m_pos = m["pos"]
-                    dist = np.sqrt(
-                        (hero_pos["x"] - m_pos["x"]) ** 2 +
-                        (hero_pos["z"] - m_pos["z"]) ** 2
-                    )
-                    if dist < min_dist:
-                        min_dist = dist
-                        monster_speed = m.get("speed", 1)
-
-        # 危险等级: 综合考虑距离和怪物速度
-        if min_dist < 30:
-            danger_level = 1.0
-        elif min_dist < 50 and monster_speed >= 2:
-            danger_level = 0.9  # 高速怪物近距离更危险
-        elif min_dist < 60:
-            danger_level = 0.7
-        elif min_dist < 90:
-            danger_level = 0.4
-        elif min_dist < 120:
-            danger_level = 0.2
+        # 按照官方文档: map_info是int32[][]二维数组
+        # 但某些版本可能是字典列表格式，需要兼容处理
+        if isinstance(map_info[0], dict) and "values" in map_info[0]:
+            # 字典列表格式 (demo中的格式)
+            map_array = np.array([line["values"] for line in map_info], np.float32)
+        elif isinstance(map_info, list) and isinstance(map_info[0], list):
+            # 直接的二维数组格式 (官方文档格式)
+            map_array = np.array(map_info, np.float32)
         else:
-            danger_level = 0.0
+            # 未知格式，尝试直接转换
+            map_array = np.array(map_info, np.float32)
 
-        progress_feat = np.array([
-            step_norm,
-            survival_ratio,
-            monster2_timer,
-            danger_level,
-        ], dtype=np.float32)
+        map_array = np.clip(map_array, 0, 1)
+        map_size = map_array.shape[0]
 
-        return progress_feat, danger_level
+        for i in range(map_size):
+            for j in range(map_size):
+                u = hero_pos[0] + i - map_size // 2
+                v = hero_pos[1] + j - map_size // 2
+                if 0 <= u < 128 and 0 <= v < 128:
+                    self.obstacles[v, u] = map_array[i, j]
+
+    def _update_treasure(self, organ, hero_pos):
+        """更新宝箱位置"""
+        organ_id = organ["config_id"] - 1  # 0-12
+        pos = np.array([organ["pos"]["x"], organ["pos"]["z"]], np.float32)
+        pos_round = pos.round().astype(np.int32)
+
+        def clean_last_pos():
+            if self.last_pos_treasures[organ_id] is not None:
+                lx, lz = self.last_pos_treasures[organ_id]
+                if 0 <= lx < 128 and 0 <= lz < 128:
+                    self.buff_treasures[lz, lx] = 0.0
+            self.last_pos_treasures[organ_id] = pos_round
+
+        # 不可获取 (已收集)
+        if organ["status"] == 0:
+            if self.avail_treasures[organ_id]:
+                if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                    self.buff_treasures[pos_round[1], pos_round[0]] = 0.0
+                self.treasure_collected += 1
+            self.avail_treasures[organ_id] = False
+            return
+
+        self.avail_treasures[organ_id] = True
+
+        # 判断是否已精确定位
+        if organ["status"] == -1:  # 视野外，大致位置
+            rel_pos = organ.get("relative_pos", {})
+            direction = rel_pos.get("direction", 0)
+            distance_bucket = rel_pos.get("l2_distance", 3)
+
+            # 估算距离
+            est_dist = [10, 30, 60, 90, 120, 150][min(distance_bucket, 5)]
+            angle = (direction - 1) * 45 if direction > 0 else 0
+            dx = est_dist * math.cos(math.radians(angle))
+            dz = est_dist * math.sin(math.radians(angle))
+            est_pos = np.array([
+                max(0, min(127, hero_pos[0] + dx)),
+                max(0, min(127, hero_pos[1] + dz)),
+            ], np.float32)
+            pos_round = est_pos.round().astype(np.int32)
+
+            clean_last_pos()
+            if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                self.buff_treasures[pos_round[1], pos_round[0]] = 0.5
+        else:  # 视野内，精确位置
+            clean_last_pos()
+            if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                self.buff_treasures[pos_round[1], pos_round[0]] = 1.0
+
+    def _update_buff(self, organ, hero_pos):
+        """更新Buff位置"""
+        pos = np.array([organ["pos"]["x"], organ["pos"]["z"]], np.float32)
+        pos_round = pos.round().astype(np.int32)
+
+        def clean_last_pos():
+            if self.last_pos_buff is not None:
+                lx, lz = self.last_pos_buff
+                if 0 <= lx < 128 and 0 <= lz < 128:
+                    self.buff_treasures[lz, lx] = 0.0
+            self.last_pos_buff = pos_round
+
+        # 不可获取 (已收集)
+        if organ["status"] == 0:
+            if self.avail_buff:
+                if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                    self.buff_treasures[pos_round[1], pos_round[0]] = 0.0
+                self.buff_count += 1
+            self.avail_buff = False
+            return
+
+        self.avail_buff = True
+
+        if organ["status"] == -1:  # 视野外
+            rel_pos = organ.get("relative_pos", {})
+            direction = rel_pos.get("direction", 0)
+            distance_bucket = rel_pos.get("l2_distance", 3)
+
+            est_dist = [10, 30, 60, 90, 120, 150][min(distance_bucket, 5)]
+            angle = (direction - 1) * 45 if direction > 0 else 0
+            dx = est_dist * math.cos(math.radians(angle))
+            dz = est_dist * math.sin(math.radians(angle))
+            est_pos = np.array([
+                max(0, min(127, hero_pos[0] + dx)),
+                max(0, min(127, hero_pos[1] + dz)),
+            ], np.float32)
+            pos_round = est_pos.round().astype(np.int32)
+
+            clean_last_pos()
+            if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                self.buff_treasures[pos_round[1], pos_round[0]] = -0.5
+        else:  # 视野内
+            clean_last_pos()
+            if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                self.buff_treasures[pos_round[1], pos_round[0]] = -1.0
+
+    def _update_end(self, organ, hero_pos):
+        """更新终点位置"""
+        pos = np.array([organ["pos"]["x"], organ["pos"]["z"]], np.float32)
+        pos_round = pos.round().astype(np.int32)
+
+        def clean_last_pos():
+            if self.last_pos_end is not None:
+                lx, lz = self.last_pos_end
+                if 0 <= lx < 128 and 0 <= lz < 128:
+                    self.end[lz, lx] = 0.0
+            self.last_pos_end = pos_round
+
+        if organ["status"] == -1:  # 视野外
+            rel_pos = organ.get("relative_pos", {})
+            direction = rel_pos.get("direction", 0)
+            distance_bucket = rel_pos.get("l2_distance", 3)
+
+            est_dist = [10, 30, 60, 90, 120, 150][min(distance_bucket, 5)]
+            angle = (direction - 1) * 45 if direction > 0 else 0
+            dx = est_dist * math.cos(math.radians(angle))
+            dz = est_dist * math.sin(math.radians(angle))
+            est_pos = np.array([
+                max(0, min(127, hero_pos[0] + dx)),
+                max(0, min(127, hero_pos[1] + dz)),
+            ], np.float32)
+            pos_round = est_pos.round().astype(np.int32)
+
+            clean_last_pos()
+            if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                self.end[pos_round[1], pos_round[0]] = 0.5
+        else:  # 视野内
+            clean_last_pos()
+            if 0 <= pos_round[0] < 128 and 0 <= pos_round[1] < 128:
+                self.end[pos_round[1], pos_round[0]] = 1.0
+
+    def _get_around_feature(self, size=51):
+        """
+        获取周围size x size的特征 (展平为向量)
+        返回: [4, size, size] 展平后的向量 (10404D)
+        """
+        assert size % 2 == 1, f"size must be odd, got {size}"
+
+        x = np.zeros((4, size, size), np.float32)
+
+        for i in range(size):
+            for j in range(size):
+                ii = self.hero_pos[0] + i - size // 2
+                jj = self.hero_pos[1] + j - size // 2
+
+                if 0 <= ii < 128 and 0 <= jj < 128:
+                    x[0, i, j] = self.obstacles[jj, ii]
+                    x[1, i, j] = min(self.memory[jj, ii] / 10.0, 1.0)
+
+        # 处理宝箱/Buff和终点 (超出边界的需要映射到边界)
+        def cvt_pos_to_bound(pos):
+            """将超出范围的treasure,buff,end转为的可用边界"""
+            center = np.array([size // 2, size // 2], np.int32)
+            delta_pos = pos - self.hero_pos
+
+            if abs(delta_pos[0]) <= size // 2 and abs(delta_pos[1]) <= size // 2:
+                return delta_pos + center
+
+            theta = math.atan2(delta_pos[1], delta_pos[0])
+            if abs(delta_pos[0]) > abs(delta_pos[1]):
+                delta_pos[0] = size // 2 * np.sign(delta_pos[0])
+                delta_pos[1] = round(size // 2 * abs(math.tan(theta)) * np.sign(delta_pos[1]))
+            else:
+                delta_pos[1] = size // 2 * np.sign(delta_pos[1])
+                delta_pos[0] = round(size // 2 / abs(math.tan(theta)) * np.sign(delta_pos[0]))
+            return center + delta_pos.astype(np.int32)
+
+        # 宝箱
+        treasures_pos = np.argwhere(self.buff_treasures > 0)
+        for pos in treasures_pos:
+            p = cvt_pos_to_bound(pos)
+            if 0 <= p[0] < size and 0 <= p[1] < size:
+                x[2, p[1], p[0]] = max(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
+
+        # Buff (负值)
+        buff_pos = np.argwhere(self.buff_treasures < 0)
+        for pos in buff_pos:
+            p = cvt_pos_to_bound(pos)
+            if 0 <= p[0] < size and 0 <= p[1] < size:
+                x[2, p[1], p[0]] = min(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
+
+        # 终点
+        end_pos = np.argwhere(self.end > 0)
+        for pos in end_pos:
+            p = cvt_pos_to_bound(pos)
+            if 0 <= p[0] < size and 0 <= p[1] < size:
+                x[3, p[1], p[0]] = max(x[3, p[1], p[0]], self.end[pos[0], pos[1]])
+
+        return x.flatten()
+
+    def _get_map_tensor(self, size=51):
+        """获取地图张量 [4, size, size] (用于CNN输入)"""
+        assert size % 2 == 1, f"size must be odd, got {size}"
+
+        x = np.zeros((4, size, size), np.float32)
+
+        for i in range(size):
+            for j in range(size):
+                ii = self.hero_pos[0] + i - size // 2
+                jj = self.hero_pos[1] + j - size // 2
+
+                if 0 <= ii < 128 and 0 <= jj < 128:
+                    x[0, i, j] = self.obstacles[jj, ii]
+                    x[1, i, j] = min(self.memory[jj, ii] / 10.0, 1.0)
+
+        # 处理宝箱/Buff和终点
+        def cvt_pos_to_bound(pos):
+            center = np.array([size // 2, size // 2], np.int32)
+            delta_pos = pos - self.hero_pos
+
+            if abs(delta_pos[0]) <= size // 2 and abs(delta_pos[1]) <= size // 2:
+                return delta_pos + center
+
+            theta = math.atan2(delta_pos[1], delta_pos[0])
+            if abs(delta_pos[0]) > abs(delta_pos[1]):
+                delta_pos[0] = size // 2 * np.sign(delta_pos[0])
+                delta_pos[1] = round(size // 2 * abs(math.tan(theta)) * np.sign(delta_pos[1]))
+            else:
+                delta_pos[1] = size // 2 * np.sign(delta_pos[1])
+                delta_pos[0] = round(size // 2 / abs(math.tan(theta)) * np.sign(delta_pos[0]))
+            return center + delta_pos.astype(np.int32)
+
+        treasures_pos = np.argwhere(self.buff_treasures > 0)
+        for pos in treasures_pos:
+            p = cvt_pos_to_bound(pos)
+            if 0 <= p[0] < size and 0 <= p[1] < size:
+                x[2, p[1], p[0]] = max(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
+
+        buff_pos = np.argwhere(self.buff_treasures < 0)
+        for pos in buff_pos:
+            p = cvt_pos_to_bound(pos)
+            if 0 <= p[0] < size and 0 <= p[1] < size:
+                x[2, p[1], p[0]] = min(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
+
+        end_pos = np.argwhere(self.end > 0)
+        for pos in end_pos:
+            p = cvt_pos_to_bound(pos)
+            if 0 <= p[0] < size and 0 <= p[1] < size:
+                x[3, p[1], p[0]] = max(x[3, p[1], p[0]], self.end[pos[0], pos[1]])
+
+        return x
+
+    def _get_legal_actions(self, legal_act_raw, flash_cooldown):
+        """计算合法动作掩码"""
+        mask = [True] * Config.ACTION_NUM
+
+        # 根据撞墙历史屏蔽动作
+        if self.hit_wall and self.last_action >= 0:
+            mask[self.last_action % 8] = False
+
+        # 无闪现时屏蔽闪现动作 (8-15) - cooldown>0表示冷却中，不可用
+        if flash_cooldown > 0:
+            for i in range(8):
+                mask[i + 8] = False
+
+        # 如果全False，则全部开放
+        if not any(mask):
+            mask = [True] * Config.ACTION_NUM
+
+        return mask
+
+    def _check_hit_wall(self, hero_pos):
+        """检测是否撞墙"""
+        if self.last_hero_pos is None or self.last_action < 0:
+            return False
+
+        last_move_action = self.last_action % 8
+
+        # 检测是否位置没变
+        delta_pos = np.abs(hero_pos - self.last_hero_pos)
+        delta_distance = np.linalg.norm(delta_pos)
+
+        if delta_distance < 0.1 and self.last_action != -1:
+            return True
+
+        return False
+
+    def _build_remain_info(self, env_info, hero_info, hero_pos):
+        """构建奖励计算所需的额外信息"""
+        # 计算周围记忆
+        around_memory = self._get_around_memory()
+
+        # 计算新探索格子数 (简化)
+        new_explore = 0
+
+        # 最近宝箱距离
+        nearest_treasure_dist = 999
+        for i, avail in enumerate(self.avail_treasures):
+            if avail and self.last_pos_treasures[i] is not None:
+                dist = np.linalg.norm(hero_pos - self.last_pos_treasures[i])
+                nearest_treasure_dist = min(nearest_treasure_dist, dist)
+
+        # 最近怪物距离
+        nearest_monster_dist = 999
+        monsters = env_info.get("monsters", [])
+        for m in monsters:
+            if m.get("is_in_view", 0):
+                m_pos = np.array([m["pos"]["x"], m["pos"]["z"]], np.float32)
+                dist = np.linalg.norm(hero_pos - m_pos)
+                nearest_monster_dist = min(nearest_monster_dist, dist)
+
+        # 危险等级
+        danger_level = 0.0
+        if nearest_monster_dist < 30:
+            danger_level = 1.0
+        elif nearest_monster_dist < 60:
+            danger_level = 0.7
+        elif nearest_monster_dist < 90:
+            danger_level = 0.4
+        elif nearest_monster_dist < 120:
+            danger_level = 0.2
+
+        # 使用闪现成功逃脱的判断
+        escaped = False
+        flash_used = self.last_action >= 8 if self.last_action >= 0 else False
+
+        # 从env_info获取flash信息
+        flash_cooldown = env_info.get("flash_cooldown", 0)
+        flash_status = 1 if flash_cooldown == 0 else 0
+
+        remain_info = {
+            "step": self.step,
+            "max_step": self.max_step,
+            "hero_pos": hero_pos,
+            "treasure_collected": self.treasure_collected,
+            "buff_count": self.buff_count,
+            "flash_status": flash_status,
+            "flash_cooldown": flash_cooldown,
+            "flash_used": flash_used,
+            "hit_wall": self.hit_wall,
+            "around_memory": around_memory,
+            "new_explore_grid": new_explore,
+            "nearest_treasure_dist": nearest_treasure_dist,
+            "nearest_treasure_dist_norm": min(nearest_treasure_dist / 180.0, 1.0),
+            "nearest_monster_dist": nearest_monster_dist,
+            "danger_level": danger_level,
+            "escaped": escaped,
+            "buff_remain_time": 0,  # 官方文档无此字段，设为0
+            # 用于奖励计算的历史信息
+            "prev_remain_info": {},  # 由调用者填充
+        }
+
+        return remain_info
+
+    def _get_around_memory(self, size=3):
+        """获取周围size x size的访问记忆"""
+        x = np.zeros((size, size), np.float32)
+        for i in range(size):
+            for j in range(size):
+                ii = self.hero_pos[0] + i - size // 2
+                jj = self.hero_pos[1] + j - size // 2
+                if 0 <= ii < 128 and 0 <= jj < 128:
+                    x[i, j] = self.memory[jj, ii]
+        return x
