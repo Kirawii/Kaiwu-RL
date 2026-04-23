@@ -249,11 +249,11 @@ class EpisodeRunner:
                 if done:
                     if collector:
                         # 添加终局奖励到最后一帧
-                        current_reward = collector[-1].reward
+                        current_reward = collector[-1].rew
                         if isinstance(current_reward, np.ndarray):
-                            collector[-1].reward = current_reward + final_reward
+                            collector[-1].rew = current_reward + final_reward
                         else:
-                            collector[-1].reward = float(current_reward) + final_reward
+                            collector[-1].rew = float(current_reward) + final_reward
 
                         # 填充最后一帧的next_obs (用自身表示终局)
                         collector[-1]._obs = collector[-1].obs
