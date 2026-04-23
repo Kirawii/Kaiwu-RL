@@ -242,56 +242,40 @@ def reward_shaping(
     if truncated:
         r -= Config.REW_TRUNCATED_PUNISH
 
-    # ---------- 3. 宝箱奖励/惩罚 (遗漏惩罚在终局时处理) ----------
+    # ---------- 3. 宝箱奖励 (只有收集时才给，让agent学会捡宝箱很重要) ----------
     treasure_collected = remain_info.get('treasure_collected', 0)
-    r += treasure_collected * Config.REW_TREASURE * 0.1  # 每收集一个宝箱有小奖励
+    if treasure_collected > 0:
+        r += treasure_collected * Config.REW_TREASURE  # +10 per treasure
 
-    # 向宝箱移动的距离奖励（关键！让agent知道往哪走）
-    nearest_treasure_dist = remain_info.get('nearest_treasure_dist', 999)
-    if nearest_treasure_dist < 180:
-        # 距离越近奖励越高，线性增加到3.0
-        dist_reward = (1.0 - nearest_treasure_dist / 180.0) * 3.0
-        r += dist_reward
+    # ---------- 4. 探索奖励 (关键！让agent动起来) ----------
+    # 基于移动的记忆惩罚 - 鼓励去新地方
+    around_memory = remain_info.get('around_memory', np.zeros((Config.REW_MEMORY_PUNISH_SIZE, Config.REW_MEMORY_PUNISH_SIZE)))
+    memory_sum = np.sum(around_memory)
+    # 如果周围访问次数多，给惩罚；访问新地方有隐性奖励(惩罚少)
+    r -= min(memory_sum * 0.1, 2.0)
 
-    # ---------- 4. 闪现使用奖励/惩罚 ----------
+    # 鼓励探索地图中心和边缘(宝箱可能刷新位置)
+    hero_pos = remain_info.get('hero_pos', np.array([64, 64]))
+    dist_to_center = np.linalg.norm(hero_pos - np.array([64, 64]))
+    if dist_to_center > 40:  # 远离中心，鼓励探索边缘
+        r += 0.05
+
+    # ---------- 5. 闪现使用奖励/惩罚 ----------
     flash_used = remain_info.get('flash_used', False)
     danger_level = remain_info.get('danger_level', 0)
     if flash_used:
         if danger_level > Config.DANGER_THRESHOLD_HIGH:
-            r += 0.5  # 危险时使用闪现是正确决策
+            r += 1.0  # 危险时用闪现是正确决策
         else:
-            r -= 0.1  # 安全时使用闪现略有惩罚
+            r -= 0.5  # 安全时用闪现浪费
 
-    # ---------- 5. 撞墙惩罚 ----------
+    # ---------- 6. 撞墙惩罚 ----------
     hit_wall = remain_info.get('hit_wall', False)
     if hit_wall:
         r -= Config.REW_HIT_WALL_PUNISH
 
-    # ---------- 6. Buff奖励 ----------
-    buff_count = remain_info.get('buff_count', 0)
-    r += buff_count * Config.REW_BUFF * 0.1
-
-    # ---------- 7. 每步惩罚 ----------
+    # ---------- 7. 每步小惩罚 (鼓励尽快完成任务) ----------
     r -= Config.REW_EACH_STEP_PUNISH
-
-    # ---------- 8. 距离奖励 (向目标移动) ----------
-    # 使用最近的宝箱距离变化
-    nearest_treasure_dist = remain_info.get('nearest_treasure_dist', 999)
-    if nearest_treasure_dist < 180:
-        # 归一化距离奖励 (越近越好)
-        r += (1.0 - min(nearest_treasure_dist / 180.0, 1.0)) * 0.01
-
-    # ---------- 9. 周围重复步数惩罚 ----------
-    around_memory = remain_info.get('around_memory', np.zeros((Config.REW_MEMORY_PUNISH_SIZE, Config.REW_MEMORY_PUNISH_SIZE)))
-    memory_sum = np.sum(around_memory)
-    r -= min(
-        max(memory_sum - Config.REW_MEMORY_PUNISH_THRESHOLD, 0.0) * Config.REW_MEMORY_PUNISH_COEF,
-        1.0
-    )
-
-    # ---------- 10. 探索奖励 ----------
-    new_explore_grid = remain_info.get('new_explore_grid', 0)
-    r += new_explore_grid * Config.REW_EXPLORATION
 
     # 全局缩放
     r *= Config.REW_GLOBAL_SCALE
