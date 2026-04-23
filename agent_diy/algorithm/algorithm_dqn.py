@@ -94,13 +94,19 @@ class Algorithm:
         _batch_feature = self.__convert_to_tensor(_batch_feature_vec)
 
         # 奖励和完成标记
+        def _get_scalar(val):
+            """从可能为数组或标量的值中获取标量"""
+            if isinstance(val, (np.ndarray, list, tuple)) and len(val) > 0:
+                return val[0]
+            return float(val)
+
         rew = torch.tensor([
-            frame.rew[0] if hasattr(frame.rew, '__getitem__') else frame.rew
+            _get_scalar(frame.rew)
             for frame in t_data
         ], device=self.device, dtype=torch.float32)
 
         not_done = torch.tensor([
-            0.0 if (frame.done[0] if hasattr(frame.done, '__getitem__') else frame.done) == 1.0 else 1.0
+            0.0 if _get_scalar(frame.done) == 1.0 else 1.0
             for frame in t_data
         ], device=self.device, dtype=torch.float32)
 
