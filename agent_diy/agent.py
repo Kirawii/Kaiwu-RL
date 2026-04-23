@@ -22,7 +22,7 @@ from kaiwudrl.interface.agent import BaseAgent
 
 from agent_diy.algorithm.algorithm_dqn import Algorithm
 from agent_diy.conf.conf import Config
-from agent_diy.feature.definition import ActData, ObsData
+from agent_diy.feature.definition import ActData, ObsData, NumpyData2SampleData
 from agent_diy.feature.preprocessor import Preprocessor
 
 
@@ -132,12 +132,18 @@ class Agent(BaseAgent):
         训练模型
 
         Args:
-            list_sample_data: SampleData 列表
+            list_sample_data: numpy数组列表 (由SampleData转换而来)
         """
         if list_sample_data is None or len(list_sample_data) == 0:
             return
 
-        self.algorithm.learn(list_sample_data)
+        # 将numpy数组转换回SampleData对象
+        if isinstance(list_sample_data[0], np.ndarray):
+            sample_data_list = [NumpyData2SampleData(frame) for frame in list_sample_data]
+        else:
+            sample_data_list = list_sample_data
+
+        self.algorithm.learn(sample_data_list)
 
     def save_model(self, path=None, id="1"):
         """

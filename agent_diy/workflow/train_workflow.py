@@ -262,9 +262,10 @@ class EpisodeRunner:
                     # 上报监控
                     self._report_monitor(total_reward + final_reward, step, treasure_collected, escape_count)
 
-                    # 直接yield收集的样本 (DQN不需要GAE处理)
+                    # 转换样本为numpy数组并yield (reverb需要numpy数组)
                     if collector:
-                        yield collector
+                        numpy_data = [SampleData2NumpyData(frame) for frame in collector]
+                        yield numpy_data
 
                     # 保存调试日志（前10局和每100局）
                     if self.episode_logger and (self.episode_cnt <= 10 or self.episode_cnt % 100 == 0):
