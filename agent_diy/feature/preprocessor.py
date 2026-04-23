@@ -375,24 +375,28 @@ class Preprocessor:
                 delta_pos[0] = round(size // 2 / abs(math.tan(theta)) * np.sign(delta_pos[0]))
             return center + delta_pos.astype(np.int32)
 
-        # 宝箱
+        # 宝箱 (np.argwhere返回[row, col]即[z, x])
         treasures_pos = np.argwhere(self.buff_treasures > 0)
         for pos in treasures_pos:
-            p = cvt_pos_to_bound(pos)
+            # pos是[z, x]，转换为[x, z]给cvt_pos_to_bound
+            pos_xz = np.array([pos[1], pos[0]], np.int32)
+            p = cvt_pos_to_bound(pos_xz)
             if 0 <= p[0] < size and 0 <= p[1] < size:
                 x[2, p[1], p[0]] = max(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
 
         # Buff (负值)
         buff_pos = np.argwhere(self.buff_treasures < 0)
         for pos in buff_pos:
-            p = cvt_pos_to_bound(pos)
+            pos_xz = np.array([pos[1], pos[0]], np.int32)
+            p = cvt_pos_to_bound(pos_xz)
             if 0 <= p[0] < size and 0 <= p[1] < size:
                 x[2, p[1], p[0]] = min(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
 
         # 终点
         end_pos = np.argwhere(self.end > 0)
         for pos in end_pos:
-            p = cvt_pos_to_bound(pos)
+            pos_xz = np.array([pos[1], pos[0]], np.int32)
+            p = cvt_pos_to_bound(pos_xz)
             if 0 <= p[0] < size and 0 <= p[1] < size:
                 x[3, p[1], p[0]] = max(x[3, p[1], p[0]], self.end[pos[0], pos[1]])
 
@@ -430,21 +434,25 @@ class Preprocessor:
                 delta_pos[0] = round(size // 2 / abs(math.tan(theta)) * np.sign(delta_pos[0]))
             return center + delta_pos.astype(np.int32)
 
+        # 宝箱 (np.argwhere返回[z, x]，需要转换为[x, z])
         treasures_pos = np.argwhere(self.buff_treasures > 0)
         for pos in treasures_pos:
-            p = cvt_pos_to_bound(pos)
+            pos_xz = np.array([pos[1], pos[0]], np.int32)
+            p = cvt_pos_to_bound(pos_xz)
             if 0 <= p[0] < size and 0 <= p[1] < size:
                 x[2, p[1], p[0]] = max(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
 
         buff_pos = np.argwhere(self.buff_treasures < 0)
         for pos in buff_pos:
-            p = cvt_pos_to_bound(pos)
+            pos_xz = np.array([pos[1], pos[0]], np.int32)
+            p = cvt_pos_to_bound(pos_xz)
             if 0 <= p[0] < size and 0 <= p[1] < size:
                 x[2, p[1], p[0]] = min(x[2, p[1], p[0]], self.buff_treasures[pos[0], pos[1]])
 
         end_pos = np.argwhere(self.end > 0)
         for pos in end_pos:
-            p = cvt_pos_to_bound(pos)
+            pos_xz = np.array([pos[1], pos[0]], np.int32)
+            p = cvt_pos_to_bound(pos_xz)
             if 0 <= p[0] < size and 0 <= p[1] < size:
                 x[3, p[1], p[0]] = max(x[3, p[1], p[0]], self.end[pos[0], pos[1]])
 
