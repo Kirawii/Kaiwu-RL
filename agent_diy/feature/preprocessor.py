@@ -204,8 +204,10 @@ class Preprocessor:
 
         for i in range(map_size):
             for j in range(map_size):
-                u = hero_pos[0] + i - map_size // 2
-                v = hero_pos[1] + j - map_size // 2
+                # map_array[i, j]: i是行(z), j是列(x)
+                # obstacles[v, u]: v是z, u是x
+                u = hero_pos[0] + j - map_size // 2  # x方向用列索引j
+                v = hero_pos[1] + i - map_size // 2  # z方向用行索引i
                 if 0 <= u < 128 and 0 <= v < 128:
                     self.obstacles[v, u] = map_array[i, j]
 
