@@ -178,10 +178,10 @@ class Config:
     # ==================== DQN 配置 ====================
     GAMMA = 0.995  # 折扣因子
     TARGET_UPDATE_FREQ = 200  # Target网络更新频率
-    EPSILON_MIN = 0.1
+    EPSILON_MIN = 0.15  # 提高最小探索率，保持更多探索
     EPSILON_MAX = 1.0
-    EPSILON_DECAY = 1e-6
-    START_LR = 1e-4  # 初始学习率
+    EPSILON_DECAY = 5e-6  # 加快衰减到平衡值，但保持更高探索
+    START_LR = 3e-4  # 提高学习率，加快学习
 
     # Reverb样本维度 (与agent_target_dqn一致)
     # SAMPLE_DIM = 2 * (DIM_OF_OBSERVATION + ACTION_NUM) + 4

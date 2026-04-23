@@ -246,6 +246,13 @@ def reward_shaping(
     treasure_collected = remain_info.get('treasure_collected', 0)
     r += treasure_collected * Config.REW_TREASURE * 0.1  # 每收集一个宝箱有小奖励
 
+    # 向宝箱移动的距离奖励（关键！让agent知道往哪走）
+    nearest_treasure_dist = remain_info.get('nearest_treasure_dist', 999)
+    if nearest_treasure_dist < 180:
+        # 距离越近奖励越高，线性增加到3.0
+        dist_reward = (1.0 - nearest_treasure_dist / 180.0) * 3.0
+        r += dist_reward
+
     # ---------- 4. 闪现使用奖励/惩罚 ----------
     flash_used = remain_info.get('flash_used', False)
     danger_level = remain_info.get('danger_level', 0)
