@@ -252,6 +252,11 @@ def reward_shaping(
     # 基础生存奖励
     survive_total = survive_reward + dist_shaping + step_reward + final_reward
 
+    # 撞墙惩罚
+    hit_wall = remain_info.get('hit_wall', False)
+    if hit_wall:
+        survive_total += Config.REW_HIT_WALL
+
     # ============ 宝箱收集奖励 (课程学习) ============
     treasure_reward = 0.0
 
@@ -309,6 +314,20 @@ def reward_shaping(
         buff_delta = cur_buff_dist - next_buff_dist
         buff_delta = np.clip(buff_delta, -Config.REW_DISTANCE_CLIP, Config.REW_DISTANCE_CLIP)
         distance_reward += buff_delta * Config.REW_DISTANCE * 1.5  # Buff距离奖励权重更高
+
+    # 终点距离奖励 (引导agent去终点) - 始终生效，确保agent知道要去终点
+    if 'nearest_end_dist' in remain_info and 'nearest_end_dist' in _remain_info:
+        cur_end_dist = remain_info['nearest_end_dist']
+        next_end_dist = _remain_info['nearest_end_dist']
+        # 归一化距离到0-1范围
+        cur_end_dist_norm = min(cur_end_dist / 180.0, 1.0)
+        next_end_dist_norm = min(next_end_dist / 180.0, 1.0)
+        end_delta = cur_end_dist_norm - next_end_dist_norm  # 靠近为正
+        # 始终给予较强的终点引导 (确保agent知道要去哪)
+        distance_reward += end_delta * Config.REW_END_DISTANCE
+        # 额外的接近终点奖励 (越近奖励越高)
+        if next_end_dist < 50:  # 接近终点
+            distance_reward += 0.1 * (1 - next_end_dist / 50)
 
     # ============ 记忆惩罚 (避免重复路径) ============
     memory_penalty = 0.0

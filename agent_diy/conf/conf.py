@@ -104,7 +104,7 @@ class Config:
 
     # ==================== 奖励权重 (情景奖励优化) ====================
     # 基础奖励
-    SURVIVE_REWARD_BASE = 0.01
+    SURVIVE_REWARD_BASE = 0.05  # 提高生存奖励，让agent更重视活着
 
     # 宝箱收集奖励 - 前期重收集，后期重生存
     TREASURE_REWARD_EARLY = 15.0
@@ -112,6 +112,12 @@ class Config:
 
     # 距离塑形奖励系数 (远离怪物)
     DISTANCE_SHAPING_COEF = 0.05
+
+    # 撞墙惩罚 (提高，让agent学会避开障碍)
+    REW_HIT_WALL = -2.0  # 撞墙惩罚，避免无效移动
+
+    # 终点引导奖励 (始终生效，确保agent知道要去终点)
+    REW_END_DISTANCE = 0.5  # 向终点移动的奖励系数
 
     # 探索奖励
     EXPLORATION_REWARD = 0.001

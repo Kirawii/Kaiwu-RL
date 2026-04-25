@@ -96,6 +96,10 @@ class Preprocessor:
         self.escape_count = 0       # 成功逃脱次数
         self.flash_waste_count = 0  # 浪费闪现次数
 
+        # 撞墙检测
+        self.last_hero_pos = None   # 上一帧英雄位置
+        self.last_action = -1       # 上一帧动作
+
     def feature_process(self, env_obs, last_action):
         """
         处理环境观测，返回特征向量、合法动作掩码、奖励相关信息
@@ -183,6 +187,31 @@ class Preprocessor:
         # 记录是否使用了闪现
         self.flash_used_in_step = (last_action >= 8) if last_action >= 0 else False
 
+        # 撞墙检测：执行了移动动作但位置没变
+        hit_wall = False
+        if self.last_hero_pos is not None and last_action >= 0 and last_action < 8:
+            # 上一步是移动动作(0-7)
+            last_pos = self.last_hero_pos
+            curr_pos = (hero_pos['x'], hero_pos['z'])
+            dist_moved = ((curr_pos[0] - last_pos[0])**2 + (curr_pos[1] - last_pos[1])**2)**0.5
+            if dist_moved < 0.5:  # 几乎没移动，认为是撞墙
+                hit_wall = True
+
+        # 更新上一帧信息
+        self.last_hero_pos = (hero_pos['x'], hero_pos['z'])
+        self.last_action = last_action
+
+        # 查找终点信息
+        end_info = None
+        nearest_end_dist = 999
+        for organ in organs:
+            if organ.get("sub_type") == 4:  # 终点类型
+                end_pos = organ.get("pos", {})
+                dist = ((end_pos.get("x", 0) - hero_pos['x'])**2 + (end_pos.get("z", 0) - hero_pos['z'])**2)**0.5
+                if dist < nearest_end_dist:
+                    nearest_end_dist = dist
+                    end_info = organ
+
         # 构建奖励相关信息 (包含课程学习阶段)
         # 计算周围记忆和
         around_memory_sum = self._calc_around_memory_sum()
@@ -219,6 +248,11 @@ class Preprocessor:
             'flash_wasted': flash_wasted,
             'was_in_danger': self.was_in_danger,
             'escape_count': self.escape_count,
+            # 撞墙信息
+            'hit_wall': hit_wall,
+            # 终点信息
+            'nearest_end_dist': nearest_end_dist,
+            'end_in_view': end_info is not None,
             # 历史信息
             'position_history': self.position_history.copy(),
             'danger_history': self.danger_history.copy(),
