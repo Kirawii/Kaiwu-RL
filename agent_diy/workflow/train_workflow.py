@@ -16,8 +16,11 @@ import numpy as np
 
 from agent_diy.feature.definition import (
     SampleData,
+    sample_process,
     reward_shaping,
-    SampleData2NumpyData,
+    get_current_gamma,
+    get_current_lambda,
+    get_current_beta,
 )
 from agent_diy.conf.conf import Config
 from tools.metrics_utils import get_training_metrics
@@ -53,8 +56,8 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
         return
 
     # 创建对局运行器
-    # 调试模式开关：设置为True启用可视化工具
-    enable_debug = False  # 关闭调试/可视化
+    # 从环境变量或配置中读取是否启用调试
+    enable_debug = os.environ.get('ENABLE_DEBUG', 'false').lower() == 'true'
     episode_runner = EpisodeRunner(
         env=env,
         agent=agent,
@@ -67,7 +70,7 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     # 训练循环
     while True:
         for g_data in episode_runner.run_episodes():
-            # 发送样本进行训练 (保持SampleData格式)
+            # 发送样本进行训练
             agent.send_sample_data(g_data)
             g_data.clear()
 
@@ -77,9 +80,13 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
                 agent.save_model()
                 last_save_model_time = now
 
-                # 打印训练步数
+                # 打印当前动态参数
                 train_step = agent.algorithm.train_step if hasattr(agent.algorithm, 'train_step') else 0
-                logger.info(f"[Train] step:{train_step} model saved")
+                logger.info(
+                    f"[Dynamic Params] gamma:{get_current_gamma(train_step):.4f} "
+                    f"lambda:{get_current_lambda(train_step):.4f} "
+                    f"beta:{get_current_beta(train_step):.4f}"
+                )
 
 
 class EpisodeRunner:
@@ -232,16 +239,19 @@ class EpisodeRunner:
                         f"reward:{total_reward:.3f}"
                     )
 
-                # 构造样本帧 (DQN格式, 与agent_target_dqn一致)
+                # 构造样本帧 (包含map_tensor用于CNN训练)
                 frame = SampleData(
                     obs=np.array(obs_data.feature, dtype=np.float32),
-                    _obs=None,  # 将在下一帧填充
-                    obs_legal=np.array(obs_data.legal_act, dtype=np.float32),
-                    _obs_legal=None,  # 将在下一帧填充
-                    act=int(act_data.action[0]),
-                    rew=float(reward[0]) if isinstance(reward, np.ndarray) else float(reward),
-                    ret=0.0,  # 备用字段
-                    done=float(done),
+                    legal_action=np.array(obs_data.legal_act, dtype=np.float32),
+                    act=np.array([act_data.action[0]], dtype=np.float32),
+                    reward=reward,
+                    done=np.array([float(done)], dtype=np.float32),
+                    reward_sum=np.zeros(1, dtype=np.float32),
+                    value=np.array(act_data.value, dtype=np.float32).flatten()[:1],
+                    next_value=np.zeros(1, dtype=np.float32),
+                    advantage=np.zeros(1, dtype=np.float32),
+                    prob=np.array(act_data.prob, dtype=np.float32),
+                    map_tensor=obs_data.map_tensor if obs_data.map_tensor is not None else np.zeros((4, 51, 51), dtype=np.float32),
                 )
                 collector.append(frame)
 
@@ -249,23 +259,16 @@ class EpisodeRunner:
                 if done:
                     if collector:
                         # 添加终局奖励到最后一帧
-                        current_reward = collector[-1].rew
-                        if isinstance(current_reward, np.ndarray):
-                            collector[-1].rew = current_reward + final_reward
-                        else:
-                            collector[-1].rew = float(current_reward) + final_reward
-
-                        # 填充最后一帧的next_obs (用自身表示终局)
-                        collector[-1]._obs = collector[-1].obs
-                        collector[-1]._obs_legal = collector[-1].obs_legal
+                        collector[-1].reward = collector[-1].reward + final_reward
 
                     # 上报监控
                     self._report_monitor(total_reward + final_reward, step, treasure_collected, escape_count)
 
-                    # 转换样本为numpy数组并yield (reverb需要numpy数组)
+                    # 处理样本并yield (传入训练步数用于动态参数)
+                    train_step = self.agent.algorithm.train_step if hasattr(self.agent.algorithm, 'train_step') else 0
                     if collector:
-                        numpy_data = [SampleData2NumpyData(frame) for frame in collector]
-                        yield numpy_data
+                        collector = sample_process(collector, train_step)
+                        yield collector
 
                     # 保存调试日志（前10局和每100局）
                     if self.episode_logger and (self.episode_cnt <= 10 or self.episode_cnt % 100 == 0):
@@ -273,11 +276,6 @@ class EpisodeRunner:
                         self.logger.info(f"[DEBUG] Episode log saved: {log_path}")
 
                     break
-
-                # 填充上一帧的next_obs和next_legal_action
-                if collector:
-                    collector[-1]._obs = np.array(_obs_data.feature, dtype=np.float32)
-                    collector[-1]._obs_legal = np.array(_obs_data.legal_act, dtype=np.float32)
 
                 # 更新状态
                 obs_data = _obs_data
